@@ -1,0 +1,620 @@
+# webapp_server.py
+import os
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from aiohttp import web
+import logging
+import asyncio
+import webbrowser
+
+# Конфигурация
+HOST = "127.0.0.1"  # Локальный IP-адрес
+PORT = 8000  # Порт для веб-сервера
+WEBAPP_FOLDER = "webapp"  # Папка с веб-приложением
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Создаем папку для веб-приложения, если ее нет
+os.makedirs(WEBAPP_FOLDER, exist_ok=True)
+
+# Путь к файлу HTML
+MATCH3_HTML_FILE = os.path.join(WEBAPP_FOLDER, "match3-game.html")
+
+# HTML-код игры
+MATCH3_HTML = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Игра 3 в ряд</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f0f2f5;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            color: #333;
+        }
+
+        .game-container {
+            max-width: 400px;
+            width: 95%;
+            background-color: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        .game-board {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            grid-gap: 5px;
+            margin-bottom: 20px;
+        }
+
+        .cell {
+            width: 100%;
+            aspect-ratio: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            background-color: #eef0f2;
+            border-radius: 8px;
+            cursor: pointer;
+            user-select: none;
+            transition: all 0.2s ease;
+        }
+
+        .cell.selected {
+            background-color: #d1e7ff;
+            transform: scale(0.95);
+            box-shadow: 0 0 0 2px #2196F3;
+        }
+
+        .stats {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 15px;
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .button {
+            width: 100%;
+            padding: 12px;
+            background-color: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        .button:hover {
+            background-color: #0d8bf2;
+        }
+
+        /* Добавляем стили для результатов игры */
+        .results {
+            text-align: center;
+            margin: 20px 0;
+            font-size: 18px;
+            line-height: 1.5;
+        }
+
+        /* Для локального тестирования добавляем кнопку "Отправить результаты" */
+        .send-results {
+            margin-top: 10px;
+            background-color: #4CAF50;
+        }
+
+        .send-results:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <div class="game-container">
+        <div class="header">
+            <h1>Игра 3 в ряд</h1>
+        </div>
+
+        <div class="stats">
+            <div>Счёт: <span id="score">0</span></div>
+            <div>Ходы: <span id="moves">0</span></div>
+        </div>
+
+        <div class="game-board" id="gameBoard"></div>
+
+        <div id="resultsContainer" style="display: none;" class="results">
+            <h2>Результаты игры</h2>
+            <p>Счёт: <span id="finalScore">0</span></p>
+            <p>Ходы: <span id="finalMoves">0</span></p>
+            <p>Время игры: <span id="gameDuration">0</span> секунд</p>
+            <p>Заработано очков: <span id="earnedPoints">0</span></p>
+
+            <!-- Кнопка для локального тестирования -->
+            <button class="button send-results" id="sendResultsButton">Отправить результаты</button>
+        </div>
+
+        <button class="button" id="exitButton">Завершить игру</button>
+    </div>
+
+    <script>
+        // Проверяем, работаем ли мы в Telegram WebApp
+        let isTelegramWebApp = window.Telegram && window.Telegram.WebApp;
+        let tg = isTelegramWebApp ? window.Telegram.WebApp : null;
+
+        // Если это Telegram WebApp, настраиваем его
+        if (isTelegramWebApp) {
+            tg.expand();  // Раскрываем приложение на весь экран
+
+            // Настраиваем темную или светлую тему в зависимости от темы Telegram
+            document.body.style.backgroundColor = tg.colorScheme === 'dark' ? '#1f2937' : '#f0f2f5';
+            document.body.style.color = tg.colorScheme === 'dark' ? '#ffffff' : '#333333';
+            document.querySelector('.game-container').style.backgroundColor = tg.colorScheme === 'dark' ? '#374151' : '#ffffff';
+            document.querySelectorAll('.cell').forEach(cell => {
+                cell.style.backgroundColor = tg.colorScheme === 'dark' ? '#4b5563' : '#eef0f2';
+            });
+        }
+
+        // Символы для игры
+        const SYMBOLS = ['🍎', '🍊', '🍋', '🍉', '🥝', '🍓'];
+
+        // Игровое состояние
+        let state = {
+            board: [],
+            score: 0,
+            moves: 0,
+            selectedCell: null,
+            startTime: new Date(),
+            isGameOver: false
+        };
+
+        // Функции игры
+        function initGame() {
+            // Сбрасываем статус игры
+            state.isGameOver = false;
+
+            // Скрываем результаты игры если они были показаны
+            document.getElementById('resultsContainer').style.display = 'none';
+            document.getElementById('exitButton').style.display = 'block';
+
+            // Генерируем игровое поле
+            state.board = generateBoard(6);
+
+            // Проверяем начальное поле на совпадения
+            let matches = checkMatches(state.board);
+            while (matches.length > 0) {
+                // Если есть совпадения, удаляем их и обновляем доску
+                let result = removeMatches(state.board, matches);
+                state.board = result.board;
+                matches = checkMatches(state.board);
+            }
+
+            // Сбрасываем остальное состояние
+            state.score = 0;
+            state.moves = 0;
+            state.selectedCell = null;
+            state.startTime = new Date();
+
+            // Обновляем интерфейс
+            updateBoard();
+            updateStats();
+        }
+
+        function generateBoard(size) {
+            const board = [];
+
+            for (let i = 0; i < size; i++) {
+                const row = [];
+                for (let j = 0; j < size; j++) {
+                    // Выбираем случайный символ
+                    let symbol = SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)];
+
+                    // Проверяем, чтобы не было 3+ одинаковых символов подряд при генерации
+                    // По горизонтали
+                    if (j >= 2) {
+                        while (symbol === row[j - 1] && symbol === row[j - 2]) {
+                            symbol = SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)];
+                        }
+                    }
+
+                    // По вертикали
+                    if (i >= 2) {
+                        while (symbol === board[i - 1][j] && symbol === board[i - 2][j]) {
+                            symbol = SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)];
+                        }
+                    }
+
+                    row.push(symbol);
+                }
+                board.push(row);
+            }
+
+            return board;
+        }
+
+        function checkMatches(board) {
+            const matches = [];
+            const size = board.length;
+
+            // Проверяем горизонтальные совпадения
+            for (let row = 0; row < size; row++) {
+                for (let col = 0; col < size - 2; col++) {
+                    if (board[row][col] && board[row][col] === board[row][col + 1] && board[row][col] === board[row][col + 2]) {
+                        // Нашли горизонтальное совпадение
+                        let matchLength = 3;
+                        // Проверяем, есть ли больше совпадений
+                        while (col + matchLength < size && board[row][col] === board[row][col + matchLength]) {
+                            matchLength++;
+                        }
+
+                        // Добавляем все координаты ячеек, входящих в совпадение
+                        for (let i = 0; i < matchLength; i++) {
+                            matches.push({row, col: col + i});
+                        }
+                    }
+                }
+            }
+
+            // Проверяем вертикальные совпадения
+            for (let col = 0; col < size; col++) {
+                for (let row = 0; row < size - 2; row++) {
+                    if (board[row][col] && board[row][col] === board[row + 1][col] && board[row][col] === board[row + 2][col]) {
+                        // Нашли вертикальное совпадение
+                        let matchLength = 3;
+                        // Проверяем, есть ли больше совпадений
+                        while (row + matchLength < size && board[row][col] === board[row + matchLength][col]) {
+                            matchLength++;
+                        }
+
+                        // Добавляем все координаты ячеек, входящих в совпадение
+                        for (let i = 0; i < matchLength; i++) {
+                            matches.push({row: row + i, col});
+                        }
+                    }
+                }
+            }
+
+            // Убираем дубликаты
+            return [...new Map(matches.map(item => [item.row + '-' + item.col, item])).values()];
+        }
+
+        function removeMatches(board, matches) {
+            // Создаем копию доски
+            const newBoard = board.map(row => [...row]);
+            const size = board.length;
+
+            // Подсчитываем очки
+            let score = matches.length * 10;  // 10 очков за каждую удаленную ячейку
+
+            // Подсчитываем количество совпадений в каждой строке и столбце для бонусов
+            const rowMatches = {};
+            const colMatches = {};
+
+            for (const match of matches) {
+                rowMatches[match.row] = (rowMatches[match.row] || 0) + 1;
+                colMatches[match.col] = (colMatches[match.col] || 0) + 1;
+            }
+
+            // Бонусы за длинные цепочки (4+ элементов)
+            for (const row in rowMatches) {
+                if (rowMatches[row] >= 4) {
+                    score += (rowMatches[row] - 3) * 20;
+                }
+            }
+
+            for (const col in colMatches) {
+                if (colMatches[col] >= 4) {
+                    score += (colMatches[col] - 3) * 20;
+                }
+            }
+
+            // Отмечаем совпадения для удаления (заменяем на null)
+            for (const match of matches) {
+                newBoard[match.row][match.col] = null;
+            }
+
+            // Смещаем элементы вниз (гравитация)
+            for (let col = 0; col < size; col++) {
+                // Собираем все неудаленные элементы в столбце
+                const columnCells = [];
+                for (let row = 0; row < size; row++) {
+                    if (newBoard[row][col] !== null) {
+                        columnCells.push(newBoard[row][col]);
+                    }
+                }
+
+                // Заполняем верх столбца новыми случайными элементами
+                while (columnCells.length < size) {
+                    columnCells.unshift(SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)]);
+                }
+
+                // Обновляем столбец на доске
+                for (let row = 0; row < size; row++) {
+                    newBoard[row][col] = columnCells[row];
+                }
+            }
+
+            return { board: newBoard, score };
+        }
+
+        function swapCells(board, cell1, cell2) {
+            // Создаем копию доски
+            const newBoard = board.map(row => [...row]);
+
+            // Проверяем, что позиции соседние
+            const isAdjacent = 
+                (Math.abs(cell1.row - cell2.row) === 1 && cell1.col === cell2.col) || 
+                (Math.abs(cell1.col - cell2.col) === 1 && cell1.row === cell2.row);
+
+            if (!isAdjacent) {
+                return { board, success: false, message: "Можно менять только соседние ячейки!" };
+            }
+
+            // Меняем ячейки местами
+            const temp = newBoard[cell1.row][cell1.col];
+            newBoard[cell1.row][cell1.col] = newBoard[cell2.row][cell2.col];
+            newBoard[cell2.row][cell2.col] = temp;
+
+            // Проверяем, образуется ли совпадение после обмена
+            const matches = checkMatches(newBoard);
+
+            if (matches.length > 0) {
+                return { board: newBoard, success: true, matches };
+            } else {
+                // Если совпадений нет, возвращаем клетки обратно
+                return { board, success: false, message: "Этот ход не создает совпадения!" };
+            }
+        }
+
+        function updateBoard() {
+            const gameBoard = document.getElementById('gameBoard');
+            gameBoard.innerHTML = '';
+
+            for (let i = 0; i < state.board.length; i++) {
+                for (let j = 0; j < state.board[i].length; j++) {
+                    const cell = document.createElement('div');
+                    cell.className = 'cell';
+                    cell.textContent = state.board[i][j];
+
+                    // Если ячейка выбрана, добавляем класс
+                    if (state.selectedCell && state.selectedCell.row === i && state.selectedCell.col === j) {
+                        cell.classList.add('selected');
+                    }
+
+                    // Если игра не завершена, добавляем обработчик клика
+                    if (!state.isGameOver) {
+                        cell.addEventListener('click', () => handleCellClick(i, j));
+                    }
+
+                    gameBoard.appendChild(cell);
+                }
+            }
+        }
+
+        function updateStats() {
+            document.getElementById('score').textContent = state.score;
+            document.getElementById('moves').textContent = state.moves;
+        }
+
+        function handleCellClick(row, col) {
+            // Если игра завершена, не обрабатываем клики
+            if (state.isGameOver) return;
+
+            // Если ячейка еще не выбрана, выбираем её
+            if (!state.selectedCell) {
+                state.selectedCell = { row, col };
+                updateBoard();
+                return;
+            }
+
+            // Если нажали на ту же ячейку, отменяем выбор
+            if (state.selectedCell.row === row && state.selectedCell.col === col) {
+                state.selectedCell = null;
+                updateBoard();
+                return;
+            }
+
+            // Пытаемся обменять выбранную ячейку с новой
+            const result = swapCells(state.board, state.selectedCell, { row, col });
+
+            // Сбрасываем выбранную ячейку
+            state.selectedCell = null;
+
+            if (result.success) {
+                // Обмен прошел успешно, есть совпадения
+                state.board = result.board;
+                state.moves++;
+
+                // Обрабатываем совпадения
+                processMatches(result.matches);
+            } else {
+                // Обмен не удался, показываем сообщение
+                alert(result.message);
+                updateBoard();
+            }
+        }
+
+        function processMatches(matches) {
+            // Удаляем совпадения и добавляем очки
+            let result = removeMatches(state.board, matches);
+            state.board = result.board;
+            state.score += result.score;
+
+            // Обновляем доску
+            updateBoard();
+            updateStats();
+
+            // Проверяем новые совпадения
+            const newMatches = checkMatches(state.board);
+            if (newMatches.length > 0) {
+                // Если есть новые совпадения, обрабатываем их с небольшой задержкой для анимации
+                setTimeout(() => processMatches(newMatches), 300);
+            } else {
+                // Проверяем условия завершения игры
+                checkGameEnd();
+            }
+        }
+
+        function checkGameEnd() {
+            // Игра заканчивается при достижении 1000 очков или 30 ходов
+            if (state.score >= 1000 || state.moves >= 30) {
+                endGame();
+            }
+        }
+
+        function endGame() {
+            // Отмечаем, что игра завершена
+            state.isGameOver = true;
+
+            // Подсчитываем время игры
+            const endTime = new Date();
+            const durationSeconds = Math.floor((endTime - state.startTime) / 1000);
+
+            // Собираем результаты
+            const gameResults = {
+                score: state.score,
+                moves: state.moves,
+                duration: durationSeconds,
+                points: Math.min(100, Math.floor(state.score / 10))
+            };
+
+            // Обновляем интерфейс с результатами
+            document.getElementById('finalScore').textContent = gameResults.score;
+            document.getElementById('finalMoves').textContent = gameResults.moves;
+            document.getElementById('gameDuration').textContent = gameResults.duration;
+            document.getElementById('earnedPoints').textContent = gameResults.points;
+
+            // Показываем контейнер с результатами
+            document.getElementById('resultsContainer').style.display = 'block';
+            document.getElementById('exitButton').style.display = 'none';
+
+            // Если мы в Telegram WebApp, отправляем результаты
+            if (isTelegramWebApp) {
+                tg.sendData(JSON.stringify(gameResults));
+                // Не закрываем веб-приложение автоматически, чтобы пользователь мог увидеть результаты
+            } else {
+                // Для локального тестирования показываем результаты и кнопку
+                console.log("Игра завершена:", gameResults);
+            }
+        }
+
+        // Инициализация игры
+        document.addEventListener('DOMContentLoaded', () => {
+            initGame();
+
+            // Обработчик кнопки выхода
+            document.getElementById('exitButton').addEventListener('click', () => {
+                if (!state.isGameOver) {
+                    endGame();
+                }
+            });
+
+            // Обработчик кнопки отправки результатов (для локального тестирования)
+            document.getElementById('sendResultsButton').addEventListener('click', () => {
+                // Эта кнопка нужна только для локального тестирования
+                // В Telegram WebApp результаты отправляются автоматически
+                alert("Результаты отправлены (эмуляция)");
+
+                // Перезапуск игры для тестирования
+                initGame();
+            });
+        });
+    </script>
+</body>
+</html>
+"""
+
+
+# Функция для создания файла HTML
+def create_html_file():
+    try:
+        with open(MATCH3_HTML_FILE, 'w', encoding='utf-8') as f:
+            f.write(MATCH3_HTML)
+        logger.info(f"HTML-файл создан: {MATCH3_HTML_FILE}")
+    except Exception as e:
+        logger.error(f"Ошибка при создании HTML-файла: {e}")
+
+
+# Класс для обработки веб-запросов
+class SimpleHTTPRequestHandlerWithCORS(SimpleHTTPRequestHandler):
+    def end_headers(self):
+        # Добавляем заголовки CORS для локального тестирования
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type')
+        return super().end_headers()
+
+
+# Функция для запуска HTTP-сервера
+def run_http_server():
+    os.chdir(WEBAPP_FOLDER)  # Меняем текущую директорию на папку с веб-приложением
+
+    httpd = HTTPServer((HOST, PORT), SimpleHTTPRequestHandlerWithCORS)
+    logger.info(f"Сервер запущен на http://{HOST}:{PORT}/")
+
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        logger.info("Сервер остановлен")
+        httpd.server_close()
+
+
+# Асинхронный веб-сервер для обработки веб-запросов
+async def run_aiohttp_server():
+    app = web.Application()
+
+    # Обработчики маршрутов
+    async def handle_root(request):
+        return web.FileResponse(MATCH3_HTML_FILE)
+
+    # Настройка маршрутов
+    app.router.add_get('/', handle_root)
+    app.router.add_static('/', path=WEBAPP_FOLDER)
+
+    # Запуск сервера
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, HOST, PORT)
+    await site.start()
+
+    logger.info(f"Сервер запущен на http://{HOST}:{PORT}/")
+
+    # Открываем приложение в браузере
+    webbrowser.open(f"http://{HOST}:{PORT}/")
+
+    # Ждем вечно (пока не будет прервано)
+    try:
+        while True:
+            await asyncio.sleep(3600)  # Спим 1 час
+    except asyncio.CancelledError:
+        logger.info("Сервер остановлен")
+    finally:
+        await runner.cleanup()
+
+
+if __name__ == "__main__":
+    # Создаем HTML-файл
+    create_html_file()
+
+    # Запускаем асинхронный веб-сервер
+    asyncio.run(run_aiohttp_server())
