@@ -448,6 +448,42 @@
             }
         }
 
+function endGame() {
+    // Отмечаем, что игра завершена
+    state.isGameOver = true;
+
+    // Подсчитываем время игры
+    const endTime = new Date();
+    const durationSeconds = Math.floor((endTime - state.startTime) / 1000);
+
+    // Собираем результаты
+    const gameResults = {
+        score: state.score,
+        moves: state.moves,
+        duration: durationSeconds,
+        points: Math.min(100, Math.floor(state.score / 10))
+    };
+
+    // Обновляем интерфейс с результатами
+    document.getElementById('finalScore').textContent = gameResults.score;
+    document.getElementById('finalMoves').textContent = gameResults.moves;
+    document.getElementById('gameDuration').textContent = gameResults.duration;
+    document.getElementById('earnedPoints').textContent = gameResults.points;
+
+    // Показываем контейнер с результатами
+    document.getElementById('resultsContainer').style.display = 'block';
+
+    // Если мы в Telegram WebApp, отправляем результаты
+    if (window.Telegram && window.Telegram.WebApp) {
+        // Преобразуем данные в JSON-строку и отправляем их в Telegram
+        window.Telegram.WebApp.sendData(JSON.stringify(gameResults));
+        console.log("Данные отправлены в Telegram:", gameResults);
+    } else {
+        console.log("Не удалось отправить данные в Telegram. WebApp API не доступен.");
+    }
+}
+
+
         function checkGameEnd() {
             // Игра заканчивается при достижении 1000 очков или 30 ходов
             if (state.score >= 1000 || state.moves >= 30) {
@@ -502,16 +538,28 @@
                 }
             });
 
-            // Обработчик кнопки отправки результатов (для локального тестирования)
-            document.getElementById('sendResultsButton').addEventListener('click', () => {
-                // Эта кнопка нужна только для локального тестирования
-                // В Telegram WebApp результаты отправляются автоматически
-                alert("Результаты отправлены (эмуляция)");
+            <button id="sendResultsManually" class="button" style="background-color: #4CAF50; margin-top: 10px;">
+    Отправить результаты в Telegram
+</button>
 
-                // Перезапуск игры для тестирования
-                initGame();
-            });
-        });
-    </script>
+<script>
+    // Обработчик для ручной отправки результатов
+    document.getElementById('sendResultsManually').addEventListener('click', function() {
+        if (window.Telegram && window.Telegram.WebApp) {
+            const gameResults = {
+                score: state.score,
+                moves: state.moves,
+                duration: Math.floor((new Date() - state.startTime) / 1000),
+                points: Math.min(100, Math.floor(state.score / 10))
+            };
+
+            window.Telegram.WebApp.sendData(JSON.stringify(gameResults));
+            this.textContent = 'Результаты отправлены!';
+            this.disabled = true;
+        } else {
+            alert('Не удалось отправить данные в Telegram. Убедитесь, что вы открыли приложение через Telegram.');
+        }
+    });
+</script>
 </body>
 </html>
